@@ -1,12 +1,20 @@
 import Graphics.UI.GLUT
-import Data.List
 import Data.Time
 import Data.Complex
 import Data.IORef
 import Control.Monad
 import System.Exit
 
-g = sin
+g t = sin t
+
+idxLen :: Int
+idxLen = 500
+
+wavePoints :: [(Double, Double)]
+wavePoints = map (\x -> (x, g x)) . take idxLen $ iterate (+0.0167) 0
+
+fftPoints :: [(Double, Double)]
+fftPoints = map (\f -> let (x:+y) = (/fromIntegral idxLen) . sum $ map (\t -> (g t:+0) * exp (-2 * pi * (0:+1) * (t:+0) * (f:+0))) . take idxLen $ iterate (+0.0167) 0 in (f,y)). take (idxLen `div` 2) $ iterate (+0.0167) 0
 
 main :: IO ()
 main = do
@@ -19,63 +27,97 @@ main = do
     time <- getCurrentTime
     tickRef <- newIORef time
     frameRef <- newIORef 0.0
-    timeRef <- newIORef 0.0
     fRef <- newIORef $ 1 / pi
     fDirRef <- newIORef 0
-    points <- newIORef ([] :: [(Double, Double)])
+    idxRef <- newIORef 0
+    points <- newIORef $ map (\t -> let r :+ i = (g t:+0) * exp (-2 * pi * (0:+1) * (t:+0) * ((1 / pi):+0)) in (r, i)) . take idxLen $ iterate (+0.0167) 0
 
     keyboardMouseCallback $= Just (keyboardProc fDirRef)
-    displayCallback $= display points
-    idleCallback $= Just (idle _window tickRef frameRef timeRef fRef fDirRef points)
+    displayCallback $= display fRef points idxRef
 
     windowPosition $= Position 600 0
-    _window2 <- createWindow "Wave"
+    waveWindow <- createWindow "Wave"
+    displayCallback $= displayWave idxRef
+
+    windowPosition $= Position 0 600
+    fftWindow <- createWindow "fft"
+    displayCallback $= displayFft
+
     keyboardMouseCallback $= Just (keyboardProc fDirRef)
-    displayCallback $= displayWave
-    postRedisplay $ Just _window2
+    idleCallback $= Just (idle _window waveWindow tickRef frameRef fRef fDirRef points idxRef)
 
     mainLoop
 
-displayWave :: IO ()
-displayWave = do
+displayFft :: IO ()
+displayFft = do
     clear [ColorBuffer]
 
     renderPrimitive Lines $ do
-        vertex $ Vertex2 0.0 (-1.0 :: Double)
-        vertex $ Vertex2 0.0 (1.0 :: Double)
+        vertex $ Vertex2 (-0.9) (-1.0 :: Double)
+        vertex $ Vertex2 (-0.9) (1.0 :: Double)
         vertex $ Vertex2 (-1.0) (0.0 :: Double)
         vertex $ Vertex2 1.0 (0.0 :: Double)
+
     renderPrimitive LineStrip $
-        mapM_ (\x -> vertex $ Vertex2 (x / 50) (g (x / 5) / 10)) . take 201 $ iterate (+1) (-100 :: Double)
+        mapM_ (\(x,y) -> vertex $ Vertex2 (x / 5 - 0.9) (y / 2)) fftPoints
 
     swapBuffers
 
-display :: IORef [(Double, Double)] -> IO ()
-display pointsRef = do
+displayWave :: IORef Int -> IO ()
+displayWave idxRef = do
+    clear [ColorBuffer]
+
+    idx <- readIORef idxRef
+
+    renderPrimitive Lines $ do
+        vertex $ Vertex2 (-0.9) (-1.0 :: Double)
+        vertex $ Vertex2 (-0.9) (1.0 :: Double)
+        vertex $ Vertex2 (-1.0) (0.0 :: Double)
+        vertex $ Vertex2 1.0 (0.0 :: Double)
+
+    renderPrimitive LineStrip $
+        mapM_ (\(x, y) -> vertex $ Vertex2 (x / 5 - 0.9) (y / 5)) wavePoints
+
+    renderPrimitive Lines $ do
+        vertex $ Vertex2 (fromIntegral idx * 0.0167 / 5 - 0.9) (0.0 :: Double)
+        vertex $ Vertex2 (fromIntegral idx * 0.0167 / 5 - 0.9) (snd (wavePoints !! idx) / 5)
+
+    swapBuffers
+
+display :: IORef Double -> IORef [(Double, Double)] -> IORef Int -> IO ()
+display fRef pointsRef idxRef = do
     clear [ColorBuffer]
     lineWidth $= 2
+    pointSize $= 3
 
+    f <- readIORef fRef
     points <- readIORef pointsRef
+    idx <- readIORef idxRef
 
-    renderPrimitive LineStrip $ do
-        mapM_ (\(x, y) -> vertex $ Vertex2 y x) points
+    color $ Color3 1 1 (1 :: Double)
+    renderPrimitive Lines $ do
+        let (x, y) = points !! idx
         vertex $ Vertex2 0.0 (0.0 :: Double)
+        vertex $ Vertex2 x y
 
-    let len = genericLength points
-    renderPrimitive Points $
-        vertex $ Vertex2 ((/len) . sum . map snd $ points) ((/len) . sum . map fst $ points)
+    renderPrimitive LineStrip $
+        mapM_ (\(x, y) -> vertex $ Vertex2 x y) points
+
+    rasterPos (Vertex2 0.4 (-0.95) :: Vertex2 Float)
+    renderString Fixed8By13 $ "Interval : " ++ take 8 (show (1 / f))
 
     swapBuffers
 
 idle :: Window
+          -> Window
           -> IORef UTCTime
-          -> IORef NominalDiffTime
           -> IORef NominalDiffTime
           -> IORef Double
           -> IORef Double
           -> IORef [(Double, Double)]
+          -> IORef Int
           -> IO ()
-idle window tickRef frameRef timeRef fRef fDirRef pointsRef = do
+idle window waveWindow tickRef frameRef fRef fDirRef pointsRef idxRef = do
     tick <- readIORef tickRef
     curr <- getCurrentTime
 
@@ -83,20 +125,25 @@ idle window tickRef frameRef timeRef fRef fDirRef pointsRef = do
 
     writeIORef tickRef curr
     modifyIORef frameRef (+diff)
-    modifyIORef timeRef (+diff)
 
-    time <- readIORef timeRef
     frame <- readIORef frameRef
 
     when (frame > 0.0167) $ do
         modifyIORef' frameRef (\x -> x - 0.0167)
         fDir <- readIORef fDirRef
-        modifyIORef fRef (+ 0.0005 * fDir)
+        modifyIORef fRef (+ 0.001 * fDir)
         f <- readIORef fRef
-        let realTime = realToFrac time
-        let newPoints = map (\t -> let r :+ i = (g t:+0) * exp (-2 * pi * (0:+1) * (t:+0) * (f:+0)) in (r, i)) . take 2000 $ iterate (+0.0167) realTime
-        writeIORef pointsRef newPoints
+        idx <- readIORef idxRef
+        if idx >= idxLen - 1 then
+            modifyIORef idxRef (\x -> x - idx + 1)
+        else
+            modifyIORef idxRef (+1)
+
+        when (fDir /= 0) $ do
+            let newPoints = map (\t -> let r :+ i = (g t:+0) * exp (-2 * pi * (0:+1) * (t:+0) * (f:+0)) in (r, i)) . take idxLen $ iterate (+0.0167) 0
+            writeIORef pointsRef newPoints
         postRedisplay $ Just window
+        postRedisplay $ Just waveWindow
 
 keyboardProc :: IORef Double -> Key -> KeyState -> p1 -> p2 -> IO ()
 keyboardProc fDirRef ch state _ _
